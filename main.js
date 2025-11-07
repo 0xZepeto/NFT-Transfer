@@ -1,120 +1,177 @@
-/* Auto Send NFT (Termux / Node 22.18 / ethers 6.15) Files expected in same folder:
+/* Auto Send NFT (Termux / Node 22.18 / ethers 6.15) Enhanced version: provider readiness check, better error handling, ownership checks, and clearer preview messages to avoid messy repeated JsonRpcProvider retries.
+
+Files required (same folder):
 
 rpc.json        : array of { "name": "BSC Mainnet", "rpc": "https://...", "chainId": 56 }
 
-pk1.txt         : private keys for option 1 (one -> many). Use single private key (first line) as sender.
+pk1.txt         : private key(s) for mode 1 (first line used as sender)
 
-pk2.txt         : private keys for option 2 (many -> one). One private key per line.
+pk2.txt         : private keys for mode 2 (one per line)
 
-idnft.txt       : NFT ids, one per line — order must match pk2.txt (for many->one). For option1 if you want to send specific ids per recipient, create ids-per-recipient manually (see below).
+idnft.txt       : NFT ids, one per line (order matters for mode 2 / optional for mode1)
 
-address.txt     : recipient addresses for option 1 (one address per line).
-
-
-Install dependencies: npm init -y npm install ethers@6.15 prompts cli-progress dotenv (optional: npm i chalk)
-
-Usage: node main.js
-
-What this script does:
-
-Lets you pick a network from rpc.json
-
-Choose mode: 1) KIRIM DARI SATU KE BANYAK  2) KIRIM DARI BANYAK KE SATU
-
-Reads private keys and NFT ids from files described above
-
-Detects whether the token contract behaves like ERC-721 or ERC-1155 and uses appropriate transfer method
-
-Shows a preview (planned transfers + estimated gas where available) BEFORE execution
-
-Shows a progress bar and attempts transfers sequentially with basic retry on failure
+address.txt     : recipient addresses (one per line) for mode 1
 
 
-Limitations & assumptions:
+Install dependencies: npm install ethers@6.15 prompts cli-progress dotenv Run with: node main.js */
 
-For ERC-1155 the script will transfer amount = 1 for each id (you can modify if needed)
+import fs from "fs"; import path from "path"; import prompts from "prompts"; import { ethers } from "ethers"; import cliProgress from "cli-progress";
 
-For option 1 we expect the sender private key to be the FIRST line of pk1.txt. If you want to use .env instead, adjust accordingly.
+const RPC_FILE = "rpc.json"; const PK1_FILE = "pk1.txt"; const PK2_FILE = "pk2.txt"; const IDNFT_FILE = "idnft.txt"; const ADDR_FILE = "address.txt";
 
-Make sure ids and addresses line up as you expect. The script will validate lengths where possible.
+function readLines(filename) { try { const raw = fs.readFileSync(path.join(process.cwd(), filename), "utf8"); return raw.split(/ ? /).map(l => l.trim()).filter(Boolean); } catch (e) { return null; } }
 
-Always test with a small amount or on a testnet first.
+function sleep(ms) { return new Promise(res => setTimeout(res, ms)); }
 
+async function ensureProviderReady(provider, rpcUrl, retries = 5, delay = 1500) { for (let i = 0; i < retries; i++) { try { const bn = await provider.getBlockNumber(); return true; } catch (e) { if (i === retries - 1) break; // brief wait then retry await sleep(delay); } } console.error(❌ Gagal terhubung ke RPC ${rpcUrl}. Pastikan URL valid & dapat diakses dari perangkatmu.); return false; }
 
-*/
+async function main() { // Load rpc.json let rpcJsonRaw; try { rpcJsonRaw = fs.readFileSync(RPC_FILE, 'utf8'); } catch (e) { console.error(❌ File ${RPC_FILE} tidak ditemukan. Buat file rpc.json sesuai format.); process.exit(1); }
 
-import fs from 'fs'; import path from 'path'; import prompts from 'prompts'; import { ethers } from 'ethers'; import cliProgress from 'cli-progress';
+let rpcJson; try { rpcJson = JSON.parse(rpcJsonRaw); } catch (e) { console.error(❌ Gagal parse ${RPC_FILE}: ${e.message}); process.exit(1); }
 
-const RPC_FILE = 'rpc.json'; const PK1_FILE = 'pk1.txt'; const PK2_FILE = 'pk2.txt'; const IDNFT_FILE = 'idnft.txt'; const ADDR_FILE = 'address.txt';
+const choices = rpcJson.map((r, i) => ({ title: ${r.name} - ${r.rpc ?? r.endpoint} (chainId ${r.chainId ?? 'unknown'}), value: i })); const respNet = await prompts({ type: 'select', name: 'net', message: '🌐 Pilih jaringan dari rpc.json', choices }); const rpcInfo = rpcJson[respNet.net]; const rpcUrl = rpcInfo.rpc ?? rpcInfo.endpoint; if (!rpcUrl) { console.error('❌ rpc atau endpoint tidak ditemukan untuk network ini.'); process.exit(1); }
 
-function readLines(filename) { try { const raw = fs.readFileSync(path.join(process.cwd(), filename), 'utf8'); return raw.split(/\r?\n/).map(l => l.trim()).filter(Boolean); } catch (e) { return null; } }
+const provider = new ethers.JsonRpcProvider(rpcUrl, rpcInfo.chainId); const ok = await ensureProviderReady(provider, rpcUrl, 5, 1200); if (!ok) process.exit(1);
 
-async function main() { // load RPC const rpcRaw = readLines(RPC_FILE); if (!rpcRaw) { console.error(File ${RPC_FILE} not found or empty. Create a rpc.json with an array of RPC objects.); process.exit(1); } let rpcJson; try { rpcJson = JSON.parse(rpcRaw.join('\n')); if (!Array.isArray(rpcJson) || rpcJson.length === 0) throw new Error('Expecting array'); } catch (e) { console.error(Failed to parse ${RPC_FILE}: ${e.message}); process.exit(1); }
+// Choose mode const modeResp = await prompts({ type: 'select', name: 'mode', message: 'Pilih mode pengiriman NFT:', choices: [ { title: '1️⃣  KIRIM DARI SATU → BANYAK', value: 1 }, { title: '2️⃣  KIRIM DARI BANYAK → SATU', value: 2 } ] }); const mode = modeResp.mode;
 
-const choices = rpcJson.map((r, i) => ({ title: ${r.name} - ${r.rpc} (chainId ${r.chainId ?? 'unknown'}), value: i })); const respNet = await prompts({ type: 'select', name: 'net', message: 'Pilih jaringan (rpc.json)', choices }); const rpcInfo = rpcJson[respNet.net]; const provider = new ethers.JsonRpcProvider(rpcInfo.rpc, rpcInfo.chainId);
+const { contract } = await prompts({ type: 'text', name: 'contract', message: 'Masukkan contract NFT (0x...)' }); if (!ethers.isAddress(contract)) { console.error('❌ Alamat contract tidak valid!'); process.exit(1); }
 
-const modeResp = await prompts({ type: 'select', name: 'mode', message: 'Pilih mode', choices: [ { title: '1. KIRIM DARI SATU KE BANYAK', value: 1 }, { title: '2. KIRIM DARI BANYAK KE SATU', value: 2 } ] }); const mode = modeResp.mode;
+// ABIs minimal const ERC721_ABI = [ 'function ownerOf(uint256 tokenId) view returns (address)', 'function safeTransferFrom(address from, address to, uint256 tokenId) external' ]; const ERC1155_ABI = [ 'function balanceOf(address account, uint256 id) view returns (uint256)', 'function safeTransferFrom(address from, address to, uint256 id, uint256 amount, bytes data) external' ];
 
-// Ask contract address const { contract: contractAddress } = await prompts({ type: 'text', name: 'contract', message: 'Masukkan contract NFT (0x...)' }); if (!contractAddress || !ethers.isAddress(contractAddress)) { console.error('Alamat contract tidak valid.'); process.exit(1); }
+const contract721 = new ethers.Contract(contract, ERC721_ABI, provider); const contract1155 = new ethers.Contract(contract, ERC1155_ABI, provider);
 
-// minimal ABIs const ERC721_ABI = [ 'function ownerOf(uint256 tokenId) view returns (address)', 'function safeTransferFrom(address from, address to, uint256 tokenId) external', 'function supportsInterface(bytes4 interfaceId) view returns (bool)' ]; const ERC1155_ABI = [ 'function balanceOf(address account, uint256 id) view returns (uint256)', 'function safeTransferFrom(address from, address to, uint256 id, uint256 amount, bytes data) external', 'function supportsInterface(bytes4 interfaceId) view returns (bool)' ];
+// Try ERC165 detection let tokenStandard = 'unknown'; try { const is721 = await contract721.supportsInterface?.('0x80ac58cd'); if (is721) tokenStandard = 'erc721'; else { const is1155 = await contract1155.supportsInterface?.('0xd9b67a26'); if (is1155) tokenStandard = 'erc1155'; } } catch (e) { tokenStandard = 'unknown'; }
 
-const contract721 = new ethers.Contract(contractAddress, ERC721_ABI, provider); const contract1155 = new ethers.Contract(contractAddress, ERC1155_ABI, provider);
+// Mode handlers if (mode === 1) { const pk1 = readLines(PK1_FILE); const addresses = readLines(ADDR_FILE); const ids = readLines(IDNFT_FILE); if (!pk1 || pk1.length === 0) { console.error(❌ ${PK1_FILE} kosong.); process.exit(1); } if (!addresses || addresses.length === 0) { console.error(❌ ${ADDR_FILE} kosong.); process.exit(1); }
 
-// Try to detect standard let tokenStandard = 'unknown'; try { // ERC-165 IDs: 0x80ac58cd for ERC721, 0xd9b67a26 for ERC1155 const is721 = await contract721.supportsInterface('0x80ac58cd'); if (is721) tokenStandard = 'erc721'; else { const is1155 = await contract1155.supportsInterface('0xd9b67a26'); if (is1155) tokenStandard = 'erc1155'; } } catch (e) { // fallback detection: try ownerOf on a sample id later tokenStandard = 'unknown'; }
+const sender = new ethers.Wallet(pk1[0], provider);
 
-// Ask files based on mode if (mode === 1) { // ONE -> MANY const pk1 = readLines(PK1_FILE); const addresses = readLines(ADDR_FILE); const ids = readLines(IDNFT_FILE); // optional: if you want different ids per recipient if (!pk1 || pk1.length === 0) { console.error(${PK1_FILE} kosong atau tidak ditemukan.); process.exit(1); } const senderPK = pk1[0]; if (!addresses || addresses.length === 0) { console.error(${ADDR_FILE} kosong atau tidak ditemukan.); process.exit(1); }
-
-// If ids provided, require same length as addresses
 let perRecipientIds = null;
 if (ids && ids.length) {
   if (ids.length !== addresses.length) {
-    console.error(`Jika menggunakan idnft.txt untuk option 1, jumlah baris harus sama dengan address.txt`);
-    process.exit(1);
-  }
-  perRecipientIds = ids;
+    console.warn('⚠️ idnft.txt jumlahnya tidak sama dengan address.txt — script akan menganggap ID tidak dispesifikasikan per recipient.');
+    perRecipientIds = null;
+  } else perRecipientIds = ids;
 }
 
-// create signer
-const sender = new ethers.Wallet(senderPK, provider);
-console.log(`Sender address: ${sender.address}`);
-
-// preview transfers: array of {from,to,tokenId}
 const plan = addresses.map((to, i) => ({ from: sender.address, to, tokenId: perRecipientIds ? perRecipientIds[i] : null }));
 
-await previewAndExecute(contractAddress, tokenStandard, provider, sender, plan, contract721, contract1155);
+// show preview with extra warnings
+console.log('
 
-} else if (mode === 2) { // MANY -> ONE const pk2 = readLines(PK2_FILE); const ids = readLines(IDNFT_FILE); if (!pk2 || pk2.length === 0) { console.error(${PK2_FILE} kosong atau tidak ditemukan.); process.exit(1); } if (!ids || ids.length === 0) { console.error(${IDNFT_FILE} kosong atau tidak ditemukan.); process.exit(1); } if (pk2.length !== ids.length) { console.error(Jumlah baris pk2.txt harus sama dengan idnft.txt (satu id per wallet sesuai urutan).); process.exit(1); }
+📋 === PREVIEW TRANSFER ==='); const previewRows = plan.map(p => ({ from: p.from, to: p.to, tokenId: p.tokenId ?? '(not specified)' })); console.table(previewRows);
+
+// warn if any tokenId looks suspicious (e.g., '0' or missing)
+let suspicious = false;
+previewRows.forEach(r => {
+  if (r.tokenId === '0' || r.tokenId === 0) {
+    console.warn(`⚠️ Perhatian: tokenId '0' ditemukan untuk penerima ${r.to}. Pastikan idnft.txt berisi id yang benar.`);
+    suspicious = true;
+  }
+  if (r.tokenId === '(not specified)') {
+    console.warn(`⚠️ Tidak ada tokenId untuk penerima ${r.to}. Transfer akan dilewati untuk baris ini.`);
+    suspicious = true;
+  }
+});
+
+const { confirm } = await prompts({ type: 'confirm', name: 'confirm', message: 'Lanjutkan kirim NFT sesuai tabel di atas?', initial: false });
+if (!confirm) { console.log('❎ Dibatalkan oleh pengguna.'); process.exit(0); }
+
+const bar = new cliProgress.SingleBar({ format: 'Progress |{bar}| {percentage}% | {value}/{total} | ETA: {eta}s' }, cliProgress.Presets.shades_classic);
+bar.start(plan.length, 0, { task: 'starting' });
+
+let idx = 0;
+for (const p of plan) {
+  bar.update(idx, { task: `to ${p.to}` });
+  try {
+    if (!p.tokenId) { console.log(`⏭️ Skipping ${p.to} karena tokenId tidak dispesifikasikan.`); }
+    else {
+      const tokenId = ethers.toBigInt(p.tokenId);
+      // ownership check for ERC721
+      if (tokenStandard === 'erc721') {
+        try {
+          const owner = await contract721.ownerOf(tokenId);
+          if (owner.toLowerCase() !== p.from.toLowerCase()) {
+            console.error(`⛔ Wallet ${p.from} bukan pemilik tokenId ${tokenId} (owner=${owner}). Melewati.`);
+            idx++; bar.increment(); continue;
+          }
+          const c = new ethers.Contract(contract, ['function safeTransferFrom(address from, address to, uint256 tokenId)'], new ethers.Wallet(readLines(PK1_FILE)[0], provider));
+          const tx = await c.safeTransferFrom(p.from, p.to, tokenId);
+          console.log(`➡️ Tx submitted: ${tx.hash}`);
+          await tx.wait();
+          console.log(`✅ Transfer sukses ke ${p.to} tokenId ${tokenId}`);
+        } catch (e) {
+          console.error(`⚠️ Gagal kirim ke ${p.to}: ${e.message || e}`);
+        }
+      } else {
+        // try as 1155
+        try {
+          const bal = await contract1155.balanceOf(p.from, tokenId);
+          if (bal <= 0) { console.error(`⛔ Wallet ${p.from} tidak memiliki tokenId ${tokenId} (balance=${bal}). Melewati.`); idx++; bar.increment(); continue; }
+          const c = new ethers.Contract(contract, ['function safeTransferFrom(address from, address to, uint256 id, uint256 amount, bytes data)'], new ethers.Wallet(readLines(PK1_FILE)[0], provider));
+          const tx = await c.safeTransferFrom(p.from, p.to, tokenId, 1, '0x');
+          console.log(`➡️ Tx submitted: ${tx.hash}`);
+          await tx.wait();
+          console.log(`✅ Transfer sukses ke ${p.to} tokenId ${tokenId}`);
+        } catch (e) {
+          console.error(`⚠️ Gagal kirim ke ${p.to}: ${e.message || e}`);
+        }
+      }
+    }
+  } catch (err) {
+    console.error(`⚠️ Error saat memproses ${p.to}: ${err.message || err}`);
+  }
+  idx++; bar.increment();
+}
+bar.stop();
+console.log('✅ Selesai semua transfer (mode 1).');
+
+} else { // Mode 2: many -> one const pk2 = readLines(PK2_FILE); const ids = readLines(IDNFT_FILE); if (!pk2 || !ids) { console.error('❌ pk2.txt atau idnft.txt kosong.'); process.exit(1); } if (pk2.length !== ids.length) { console.error('❌ Jumlah wallet pk2.txt harus sama dengan idnft.txt'); process.exit(1); }
 
 const { recipient } = await prompts({ type: 'text', name: 'recipient', message: 'Masukkan address tujuan (satu address)' });
-if (!recipient || !ethers.isAddress(recipient)) { console.error('Recipient address tidak valid.'); process.exit(1); }
+if (!ethers.isAddress(recipient)) { console.error('❌ Address tujuan tidak valid!'); process.exit(1); }
 
-// build plan: each wallet sends its id to recipient
 const plan = pk2.map((pk, i) => ({ fromPK: pk, to: recipient, tokenId: ids[i] }));
 
-// For many->one we will execute per wallet by creating a signer per PK
-await previewAndExecuteMany(contractAddress, tokenStandard, provider, plan, contract721, contract1155);
+console.log('
+
+📋 === PREVIEW TRANSFER (MANY -> ONE) ==='); const preview = plan.map((p, i) => ({ index: i+1, from: (new ethers.Wallet(p.fromPK)).address, to: p.to, tokenId: p.tokenId })); console.table(preview);
+
+const { confirm } = await prompts({ type: 'confirm', name: 'confirm', message: 'Lanjutkan kirim dari semua wallet di atas?', initial: false });
+if (!confirm) { console.log('❎ Dibatalkan oleh pengguna.'); process.exit(0); }
+
+const bar = new cliProgress.SingleBar({ format: 'Progress |{bar}| {percentage}% | {value}/{total} | ETA: {eta}s' }, cliProgress.Presets.shades_classic);
+bar.start(plan.length, 0);
+
+let idx = 0;
+for (const p of plan) {
+  try {
+    const signer = new ethers.Wallet(p.fromPK, provider);
+    const tokenId = ethers.toBigInt(p.tokenId);
+    if (tokenStandard === 'erc721') {
+      try {
+        const owner = await contract721.ownerOf(tokenId);
+        if (owner.toLowerCase() !== signer.address.toLowerCase()) { console.error(`⛔ Wallet ${signer.address} bukan pemilik tokenId ${tokenId}. Melewati.`); idx++; bar.increment(); continue; }
+        const c = new ethers.Contract(contract, ['function safeTransferFrom(address from, address to, uint256 tokenId)'], signer);
+        const tx = await c.safeTransferFrom(signer.address, p.to, tokenId);
+        console.log(`➡️ Tx: ${tx.hash}`); await tx.wait(); console.log(`✅ Sukses ${signer.address}`);
+      } catch (e) { console.error(`⚠️ Gagal dari ${signer.address}: ${e.message || e}`); }
+    } else {
+      try {
+        const bal = await contract1155.balanceOf(signer.address, tokenId);
+        if (bal <= 0) { console.error(`⛔ Wallet ${signer.address} balance=0 for id ${tokenId}. Melewati.`); idx++; bar.increment(); continue; }
+        const c = new ethers.Contract(contract, ['function safeTransferFrom(address from, address to, uint256 id, uint256 amount, bytes data)'], signer);
+        const tx = await c.safeTransferFrom(signer.address, p.to, tokenId, 1, '0x');
+        console.log(`➡️ Tx: ${tx.hash}`); await tx.wait(); console.log(`✅ Sukses ${signer.address}`);
+      } catch (e) { console.error(`⚠️ Gagal dari ${signer.address}: ${e.message || e}`); }
+    }
+  } catch (err) { console.error(`⚠️ Error for wallet index ${idx}: ${err.message || err}`); }
+  idx++; bar.increment();
+}
+bar.stop();
+console.log('✅ Selesai semua transfer (mode 2).');
 
 } }
 
-async function detectTokenStandardIfUnknown(contract721, contract1155, provider, sampleOwner, sampleId) { // attempt detection by probing ownerOf or balanceOf try { if (sampleId == null) return 'unknown'; try { const owner = await contract721.ownerOf(sampleId); if (owner) return 'erc721'; } catch (e) { // not ERC721 for this id } try { const bal = await contract1155.balanceOf(sampleOwner, sampleId); if (bal && !bal.isNegative) return 'erc1155'; } catch (e) { // not 1155 } } catch (e) {} return 'unknown'; }
-
-async function previewAndExecute(contractAddress, tokenStandard, provider, sender, plan, contract721, contract1155) { // If standard unknown — try to probe using first non-null tokenId if (tokenStandard === 'unknown') { const sample = plan.find(p => p.tokenId != null); if (sample) { tokenStandard = await detectTokenStandardIfUnknown(contract721, contract1155, provider, sender.address, sample.tokenId); } }
-
-// Build a human friendly preview table console.log('\n=== PREVIEW TRANSFERS ==='); const preview = []; for (const p of plan) { preview.push({ from: p.from, to: p.to, tokenId: p.tokenId ?? '(ask at runtime?)' }); } console.table(preview); console.log(Detected token standard (best-effort): ${tokenStandard});
-
-const { confirm } = await prompts({ type: 'confirm', name: 'confirm', message: 'Lanjutkan dan kirim transaksi sesuai rencana?' , initial: false }); if (!confirm) { console.log('Dibatalkan oleh pengguna.'); process.exit(0); }
-
-// Progress bar const bar = new cliProgress.SingleBar({ format: 'Progress |{bar}| {value}/{total} | ETA: {eta_formatted} | Current: {task}' }, cliProgress.Presets.shades_classic); bar.start(plan.length, 0, { task: 'starting' });
-
-let idx = 0; for (const p of plan) { bar.update(idx, { task: sending to ${p.to} }); try { if (!p.tokenId) { console.warn(No tokenId specified for recipient ${p.to}. Skipping.); } else { if (tokenStandard === 'erc721') { const contractWithSigner = new ethers.Contract(contractAddress, ['function safeTransferFrom(address from, address to, uint256 tokenId)'], sender); const tx = await contractWithSigner.safeTransferFrom(sender.address, p.to, ethers.toBigInt(p.tokenId)); await tx.wait(); } else if (tokenStandard === 'erc1155') { const contractWithSigner = new ethers.Contract(contractAddress, ['function safeTransferFrom(address from, address to, uint256 id, uint256 amount, bytes data)'], sender); const tx = await contractWithSigner.safeTransferFrom(sender.address, p.to, ethers.toBigInt(p.tokenId), 1, '0x'); await tx.wait(); } else { // try ERC721 then ERC1155 try { const c721 = new ethers.Contract(contractAddress, ['function safeTransferFrom(address from, address to, uint256 tokenId)'], sender); const tx = await c721.safeTransferFrom(sender.address, p.to, ethers.toBigInt(p.tokenId)); await tx.wait(); } catch (e) { const c1155 = new ethers.Contract(contractAddress, ['function safeTransferFrom(address from, address to, uint256 id, uint256 amount, bytes data)'], sender); const tx = await c1155.safeTransferFrom(sender.address, p.to, ethers.toBigInt(p.tokenId), 1, '0x'); await tx.wait(); } } // success } } catch (err) { console.error(\nGagal kirim ke ${p.to} tokenId ${p.tokenId}: ${err.message || err}); } idx++; bar.update(idx, { task: processed ${idx} }); } bar.stop(); console.log('Selesai.'); }
-
-async function previewAndExecuteMany(contractAddress, tokenStandard, provider, plan, contract721, contract1155) { // plan: [{fromPK, to, tokenId}] console.log('\n=== PREVIEW TRANSFERS (MANY -> ONE) ==='); const preview = plan.map((p, i) => ({ index: i+1, from: (new ethers.Wallet(p.fromPK)).address, to: p.to, tokenId: p.tokenId })); console.table(preview); console.log(Detected token standard (best-effort): ${tokenStandard}); const { confirm } = await prompts({ type: 'confirm', name: 'confirm', message: 'Lanjutkan dan kirim transaksi sesuai rencana?' , initial: false }); if (!confirm) { console.log('Dibatalkan oleh pengguna.'); process.exit(0); }
-
-const bar = new cliProgress.SingleBar({ format: 'Progress |{bar}| {value}/{total} | ETA: {eta_formatted} | Current: {task}' }, cliProgress.Presets.shades_classic); bar.start(plan.length, 0, { task: 'starting' });
-
-let idx = 0; for (const p of plan) { bar.update(idx, { task: from ${ (new ethers.Wallet(p.fromPK)).address} }); try { const signer = new ethers.Wallet(p.fromPK, provider); if (tokenStandard === 'erc721') { const c = new ethers.Contract(contractAddress, ['function safeTransferFrom(address from, address to, uint256 tokenId)'], signer); const tx = await c.safeTransferFrom(signer.address, p.to, ethers.toBigInt(p.tokenId)); await tx.wait(); } else if (tokenStandard === 'erc1155') { const c = new ethers.Contract(contractAddress, ['function safeTransferFrom(address from, address to, uint256 id, uint256 amount, bytes data)'], signer); const tx = await c.safeTransferFrom(signer.address, p.to, ethers.toBigInt(p.tokenId), 1, '0x'); await tx.wait(); } else { // try both try { const c1 = new ethers.Contract(contractAddress, ['function safeTransferFrom(address from, address to, uint256 tokenId)'], signer); const tx = await c1.safeTransferFrom(signer.address, p.to, ethers.toBigInt(p.tokenId)); await tx.wait(); } catch (e) { const c2 = new ethers.Contract(contractAddress, ['function safeTransferFrom(address from, address to, uint256 id, uint256 amount, bytes data)'], signer); const tx = await c2.safeTransferFrom(signer.address, p.to, ethers.toBigInt(p.tokenId), 1, '0x'); await tx.wait(); } } // success } catch (err) { console.error(\nGagal kirim dari wallet index ke ${p.to} tokenId ${p.tokenId}: ${err.message || err}); } idx++; bar.update(idx, { task: processed ${idx} }); }
-
-bar.stop(); console.log('Selesai semua transfer.'); }
-
-main().catch(e => { console.error('Fatal error:', e); process.exit(1); });
+main().catch(e => { console.error('❌ Fatal error:', e); process.exit(1); });
