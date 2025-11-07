@@ -1,0 +1,8 @@
+[
+  {
+  "name": "BSC Mainnet",
+  "endpoint": "https://bsc-mainnet.public.blastapi.io",
+  "chainId": 56,
+  "explorer": "https://bscscan.com"
+  }
+]
