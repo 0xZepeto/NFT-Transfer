@@ -1,0 +1,28 @@
+{
+  "name": "nft-auto-transfer",
+  "version": "1.0.0",
+  "description": "Automated NFT transfer tool for multiple networks",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "chalk": "^4.1.2",
+    "dotenv": "^16.3.1",
+    "ethers": "^6.15.0",
+    "ora": "^5.4.1"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "keywords": [
+    "nft",
+    "blockchain",
+    "ethereum",
+    "bsc",
+    "automation",
+    "transfer"
+  ],
+  "author": "",
+  "license": "MIT"
+}
