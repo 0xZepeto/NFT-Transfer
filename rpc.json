@@ -1,8 +1,16 @@
 [
   {
-  "name": "BSC Mainnet",
-  "endpoint": "https://bsc-mainnet.public.blastapi.io",
-  "chainId": 56,
-  "explorer": "https://bscscan.com"
+    "name": "Ethereum Mainnet",
+    "rpcUrl": "https://mainnet.infura.io/v3",
+    "chainId": "1",
+    "symbol": "ETH",
+    "explorer": "https://etherscan.io"
+  },
+  {
+    "name": "BSC Mainnet",
+    "endpoint": "https://bsc-mainnet.public.blastapi.io",
+    "chainId": 56,
+    "symbol": "BNB",
+    "explorer": "https://bscscan.com"
   }
 ]
