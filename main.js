@@ -3,13 +3,24 @@
 const ethers = require('ethers');
 const fs = require('fs');
 const readline = require('readline');
-const ora = require('ora');
 const chalk = require('chalk');
+const ora = require('ora');
 
-// ABI minimal untuk ERC721
+// ABI minimal untuk deteksi token standard
+const detectionAbi = [
+    "function supportsInterface(bytes4 interfaceID) external view returns (bool)"
+];
+
+// ABI untuk ERC721
 const erc721Abi = [
     "function safeTransferFrom(address from, address to, uint256 tokenId)",
     "function ownerOf(uint256 tokenId) view returns (address)"
+];
+
+// ABI untuk ERC1155
+const erc1155Abi = [
+    "function safeTransferFrom(address from, address to, uint256 id, uint256 amount, bytes data)",
+    "function balanceOf(address account, uint256 id) view returns (uint256)"
 ];
 
 const rl = readline.createInterface({
@@ -19,11 +30,7 @@ const rl = readline.createInterface({
 
 // Fungsi untuk menampilkan loading spinner
 function showLoading(message) {
-    const spinner = ora({
-        text: message,
-        spinner: 'dots',
-        color: 'cyan'
-    }).start();
+    const spinner = ora(message).start();
     return spinner;
 }
 
@@ -34,6 +41,31 @@ function readFile(filePath) {
     } catch (error) {
         console.error(chalk.red(`Error membaca file ${filePath}: ${error.message}`));
         process.exit(1);
+    }
+}
+
+// Fungsi untuk mendeteksi token standard
+async function detectTokenStandard(provider, contractAddress) {
+    const detectionContract = new ethers.Contract(contractAddress, detectionAbi, provider);
+    
+    try {
+        // Cek apakah ERC721
+        const isERC721 = await detectionContract.supportsInterface("0x80ac58cd");
+        if (isERC721) {
+            return "erc721";
+        }
+        
+        // Cek apakah ERC1155
+        const isERC1155 = await detectionContract.supportsInterface("0xd9b67a26");
+        if (isERC1155) {
+            return "erc1155";
+        }
+        
+        // Default ke ERC721 jika tidak terdeteksi
+        return "erc721";
+    } catch (error) {
+        console.log(chalk.yellow("⚠️ Tidak bisa mendeteksi token standard, menggunakan ERC721 sebagai default"));
+        return "erc721";
     }
 }
 
@@ -72,10 +104,14 @@ async function main() {
         process.exit(1);
     }
 
+    // Deteksi token standard
+    const tokenStandard = await detectTokenStandard(provider, contractAddress);
+    console.log(chalk.green(`\nDeteksi token standard: ${tokenStandard.toUpperCase()}\n`));
+
     if (option === '1') {
-        await sendFromOneToMany(provider, selectedNetwork, contractAddress);
+        await sendFromOneToMany(provider, selectedNetwork, contractAddress, tokenStandard);
     } else if (option === '2') {
-        await sendFromManyToOne(provider, selectedNetwork, contractAddress);
+        await sendFromManyToOne(provider, selectedNetwork, contractAddress, tokenStandard);
     } else {
         console.error(chalk.red('Opsi tidak valid!'));
         process.exit(1);
@@ -85,7 +121,7 @@ async function main() {
 }
 
 // Opsi 1: Kirim dari satu ke banyak
-async function sendFromOneToMany(provider, network, contractAddress) {
+async function sendFromOneToMany(provider, network, contractAddress, tokenStandard) {
     // Baca private key dari .env
     require('dotenv').config();
     const privateKey = process.env.PRIVATE_KEY;
@@ -105,11 +141,15 @@ async function sendFromOneToMany(provider, network, contractAddress) {
 
     // Buat wallet
     const wallet = new ethers.Wallet(privateKey, provider);
-    const contract = new ethers.Contract(contractAddress, erc721Abi, wallet);
+    
+    // Pilih ABI berdasarkan token standard
+    const abi = tokenStandard === "erc1155" ? erc1155Abi : erc721Abi;
+    const contract = new ethers.Contract(contractAddress, abi, wallet);
 
     // Preview
     console.log(chalk.blue.bold('\n=== PREVIEW TRANSAKSI ==='));
     console.log(chalk.cyan(`Jaringan: ${network.name}`));
+    console.log(chalk.cyan(`Token Standard: ${tokenStandard.toUpperCase()}`));
     console.log(chalk.cyan(`Pengirim: ${wallet.address}`));
     console.log(chalk.cyan(`Kontrak NFT: ${contractAddress}`));
     console.log(chalk.yellow('\nDaftar Pengiriman:'));
@@ -132,17 +172,36 @@ async function sendFromOneToMany(provider, network, contractAddress) {
 
         try {
             // Verifikasi kepemilikan NFT
-            const owner = await contract.ownerOf(tokenId);
-            if (owner.toLowerCase() !== wallet.address.toLowerCase()) {
-                throw new Error('Wallet bukan pemilik NFT ini!');
+            if (tokenStandard === "erc721") {
+                const owner = await contract.ownerOf(tokenId);
+                if (owner.toLowerCase() !== wallet.address.toLowerCase()) {
+                    throw new Error('Wallet bukan pemilik NFT ini!');
+                }
+            } else {
+                // Untuk ERC1155, cek balance
+                const balance = await contract.balanceOf(wallet.address, tokenId);
+                if (balance === 0n) {
+                    throw new Error('Wallet tidak memiliki NFT ini!');
+                }
             }
 
             // Kirim transaksi
-            const tx = await contract.safeTransferFrom(
-                wallet.address,
-                recipient,
-                tokenId
-            );
+            let tx;
+            if (tokenStandard === "erc1155") {
+                tx = await contract.safeTransferFrom(
+                    wallet.address,
+                    recipient,
+                    tokenId,
+                    1, // amount
+                    "0x" // data
+                );
+            } else {
+                tx = await contract.safeTransferFrom(
+                    wallet.address,
+                    recipient,
+                    tokenId
+                );
+            }
 
             await tx.wait();
             spinner.succeed(chalk.green(`Berhasil! TX: ${network.explorer}/tx/${tx.hash}`));
@@ -153,7 +212,7 @@ async function sendFromOneToMany(provider, network, contractAddress) {
 }
 
 // Opsi 2: Kirim dari banyak ke satu
-async function sendFromManyToOne(provider, network, contractAddress) {
+async function sendFromManyToOne(provider, network, contractAddress, tokenStandard) {
     // Baca file
     const privateKeys = readFile('pk.txt');
     const tokenIds = readFile('idnft.txt');
@@ -173,6 +232,7 @@ async function sendFromManyToOne(provider, network, contractAddress) {
     // Preview
     console.log(chalk.blue.bold('\n=== PREVIEW TRANSAKSI ==='));
     console.log(chalk.cyan(`Jaringan: ${network.name}`));
+    console.log(chalk.cyan(`Token Standard: ${tokenStandard.toUpperCase()}`));
     console.log(chalk.cyan(`Penerima: ${recipient}`));
     console.log(chalk.cyan(`Kontrak NFT: ${contractAddress}`));
     console.log(chalk.yellow('\nDaftar Pengiriman:'));
@@ -193,22 +253,45 @@ async function sendFromManyToOne(provider, network, contractAddress) {
         const tokenId = tokenIds[i].trim();
         const privateKey = privateKeys[i].trim();
         const wallet = new ethers.Wallet(privateKey, provider);
-        const contract = new ethers.Contract(contractAddress, erc721Abi, wallet);
+        
+        // Pilih ABI berdasarkan token standard
+        const abi = tokenStandard === "erc1155" ? erc1155Abi : erc721Abi;
+        const contract = new ethers.Contract(contractAddress, abi, wallet);
+        
         const spinner = showLoading(`Mengirim NFT ID ${tokenId} dari ${wallet.address}...`);
 
         try {
             // Verifikasi kepemilikan NFT
-            const owner = await contract.ownerOf(tokenId);
-            if (owner.toLowerCase() !== wallet.address.toLowerCase()) {
-                throw new Error('Wallet bukan pemilik NFT ini!');
+            if (tokenStandard === "erc721") {
+                const owner = await contract.ownerOf(tokenId);
+                if (owner.toLowerCase() !== wallet.address.toLowerCase()) {
+                    throw new Error('Wallet bukan pemilik NFT ini!');
+                }
+            } else {
+                // Untuk ERC1155, cek balance
+                const balance = await contract.balanceOf(wallet.address, tokenId);
+                if (balance === 0n) {
+                    throw new Error('Wallet tidak memiliki NFT ini!');
+                }
             }
 
             // Kirim transaksi
-            const tx = await contract.safeTransferFrom(
-                wallet.address,
-                recipient,
-                tokenId
-            );
+            let tx;
+            if (tokenStandard === "erc1155") {
+                tx = await contract.safeTransferFrom(
+                    wallet.address,
+                    recipient,
+                    tokenId,
+                    1, // amount
+                    "0x" // data
+                );
+            } else {
+                tx = await contract.safeTransferFrom(
+                    wallet.address,
+                    recipient,
+                    tokenId
+                );
+            }
 
             await tx.wait();
             spinner.succeed(chalk.green(`Berhasil! TX: ${network.explorer}/tx/${tx.hash}`));
